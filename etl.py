@@ -1,8 +1,23 @@
 import pandas as pd
 import requests
+from datetime import datetime, timedelta
+import io
+from io import StringIO
+from datetime import datetime
+import boto3
+from dotenv import dotenv_values
+
+dotenv_values()
+
+s3_client = boto3.client('s3')
+
+bucket_name = 'raw_jobs_data'
+transformed_bucket_name = 'transformed_jobs_data'
+path = 'salesData'
+transformed_path_name = 'salesData'
 
 #created an extract function from the api
-def extract_from_API_(URL, cols,countries,jobs):
+def extract_from_API_(URL,countries,jobs):
     url = "https://jsearch.p.rapidapi.com/search"
     all_data = pd.DataFrame()
     for i in countries:
@@ -14,6 +29,56 @@ def extract_from_API_(URL, cols,countries,jobs):
             response = requests.get(url, headers=headers, params=querystring)
             response = response.json()
             data = response.get('data')
-            data = pd.DataFrame(data, columns=cols)
+            data = pd.DataFrame(data)
             all_data = pd.concat([all_data, data])
+
+    return all_data
+
+
+def load_to_s3():
+    columns=['employer_website', 'job_id', 'job_employment_type', 'job_title','job_apply_link', 'job_description', 'job_city', 'job_country','job_posted_at_datetime_utc', 'employer_company_type']
+    countries = ['USA', 'UK', 'Canada']
+    jobs = ['Data engineer', 'Data Analyst']
+    URL = "https://jsearch.p.rapidapi.com/search"
+
+    data = extract_from_API_(URL,countries,jobs)
+    
+    file_name = f"{datetime.now().strftime('%Y-%m-%d-%H-%M')}"
+    csv_buffer = StringIO()
+    data.reset_index(drop=True, inplace=True)
+    data.to_json(csv_buffer,orient='columns')
+    csv_str = csv_buffer.getvalue()
+
+
+    s3_client.put_object(Bucket=bucket_name, Key = f'{path}/{file_name}', Body=csv_str)
+
+    print("file loaded successfully")
+    
+
+def read_transform_files_from_s3():
+    columns=['employer_website', 'job_id', 'job_employment_type', 'job_title','job_apply_link', 'job_description', 'job_city', 'job_country','job_posted_at_datetime_utc', 'employer_company_type']
+
+    objects_list = s3_client.list_objects(Bucket=bucket_name, Prefix=path)
+    files = objects_list.get('Contents')
+    Keys = [file.get('Key') for file in files][1:]
+    objs = [s3_client.get_object(Bucket= bucket_name, Key=key) for key in Keys]
+    dfs = [pd.read_json(io.BytesIO(obj['Body'].read()),orient='columns') for obj in objs]
+    data = pd.concat([dfs])
+    data = data[columns]
+    data['job_posted_at_datetime_utc'] = data['job_posted_at_datetime_utc'].map(lambda x: datetime.strptime(x, '%Y-%m-%dT%H:%M:%S.%fZ').date())
+    today = datetime.now().date()
+    start_of_week = today - timedelta(days=today.weekday())
+    data = data[data['job_posted_at_datetime_utc'] >= start_of_week]
+    
+
+    file_name = f"{datetime.now().strftime('%Y-%m-%d-%H-%M')}"
+    csv_buffer = StringIO()
+    data.reset_index(drop=True, inplace=True)
+    data.to_csv(csv_buffer,index=False)
+    csv_str = csv_buffer.getvalue()
+
+    s3_client.put_object(Bucket=transformed_bucket_name, Key = f'{transformed_path_name}/{file_name}', Body=csv_str)
+
+    print("tranfomed file loaded successfully")
+    
 
